@@ -1,0 +1,373 @@
+---
+title: "Analyzing March Madness Statistics and Bracket Success"
+author: "Brian Janger"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, message = F, warning = F}
+library(tidyverse)
+```
+
+```{r creating_data, message = F, warning = F}
+basketball <- read_csv("data/ncaa_data.csv")
+basketball2 <- read_csv("data/ncaa_data_2.csv")
+marchmadness <- inner_join(basketball, basketball2)
+marchmadness <- subset(marchmadness, select = -c(X9, X12, X15, X18, MP, SRS,
+                                                 X21, W_1, L_1, W_2, L_2, W_3, L_3, Rk))
+marchmadness <- marchmadness %>%
+  filter(grepl("NCAA", School, fixed = TRUE) == T)
+marchmadness$School <- gsub(' NCAA', '', marchmadness$School)
+scores <- read_csv("data/startingvalues.csv")
+marchmadness <- inner_join(marchmadness, scores)
+marchmadness <- marchmadness %>%
+  mutate(seed = 17 - powerScore) %>%
+  mutate(ORB_gm = ORB/G) %>%
+  mutate(TRB_gm = TRB/G) %>%
+  mutate(AST_gm = AST/G) %>%
+  mutate(STL_gm = STL/G) %>%
+  mutate(BLK_gm = BLK/G) %>%
+  mutate(TOV_gm = TOV/G) %>%
+  mutate(Fouls_gm = PF/G) %>%
+  mutate(PPG = Tm./G) %>%
+  mutate(PAPG = Opp./G) %>%
+  subset(select = -c(ORB,TRB,AST,STL,BLK,TOV,PF,Tm.,Opp.))
+marchmadness <- marchmadness %>%
+  mutate(pointdiff = PPG - PAPG)
+
+# View(marchmadness)                        
+write.csv(marchmadness, 'marchmadness.csv')
+```
+
+# Developing a Base Formula for March Madness Strength
+
+To develop a base model for all of the statistics we want to use for creating a team strength metric (which will be used to determine the winners of the various games in the March Madness bracket), we need to find a way to evenly weigh all of the various statistics we want to use in the model.
+
+The main thing that we need to keep track of is that there are three main types of statistics that we want to incorpoate in our model, listed below:
+
+- Per-game statistics, such as points per game, points allowed per game, rebounds per game, etc.
+
+- Percentage based statistics, such as field goal percentage, three point percentage, free throw percentage, win percentage, etc.
+
+- Miscellaneous statistics that could have an effect on team success, such as pace, **strength of schedule**, free throws per field goal attempted, etc.
+
+It is important for the base model to not overweigh any of the statistics (as the model would then be biased toward a certain statistic), so a method for this must be devleoped.
+
+## The Importance of Strength of Schedule
+
+Strength of schedule (SOS) is a vital statistic for all of the teams in the NCAA March Madness tournament since the strength of a team's opponents throughout the season has a drastic effect on all of the other statistics of a team. For example, a team with a below average SOS (i.e. < 0) could potentially have better statistics all around than a team with a more difficult SOS, even if the second team is a better team. The opponents that a team plays has a large effect on its statistics, so using SOS as a coefficient in the model or as a "balancing factor" is very important.
+
+Below is a preliminary model idea for the power, P, of a team in the March Madness tournament based on per-game statistics which does not account for strength of schedule:
+
+$$P_1 = (PPG - PAPG) + (STL\_gm - TOV\_gm) + TRB\_gm - Fouls\_gm$$
+Applying this basic model to the data, we can sort the teams by their associated power rankings:
+
+```{r sort-power-per-game}
+marchmadness <- marchmadness %>%
+  mutate(power_pergame = PPG - PAPG + STL_gm - TOV_gm + TRB_gm - Fouls_gm)
+
+marchmadness %>%
+  arrange(desc(power_pergame)) %>%
+  subset(select = c(seed, School, power_pergame)) %>%
+  head(10)
+```
+
+We can see that some high-seeded teams top the rankings of this metric without even accounting for SOS. If we add each team's SOS to this model, we can get the following rankings:
+
+```{r sort-power-per-game-with-sos}
+marchmadness <- marchmadness %>%
+  mutate(power_pergame_SOS = power_pergame + SOS)
+
+marchmadness %>%
+  arrange(desc(power_pergame_SOS)) %>%
+  subset(select = c(seed, School, power_pergame_SOS)) %>%
+  head(10)
+```
+
+We can see that the top-ranked teams are closer to the top, but can see a lot of surprises here, the main one being Colgate, a 14 seed, which is rated as the 4th best team in the tournament based on these statistics. This is probably an indicator that there is a lot of inaccuracy in this model (throughout the season, Colgate routinely demolished bad teams and got great statistics, and their low SOS isn't low enough to counter these statistics). However, a lot of the lower-seeded teams were pushed down in the rankings due to their low strength of schedule, making this model a bit more accurate than the last.
+
+## Introducing Percentages and Efficiency
+
+A lot of the variables we want to look at in this model are not accounted for in the per-game model alone. We also want to see how percentage statistics, such as shooting percentage, steal, block, and turnover percentage, and win percentage, can affect a bracket model and a bracket's accuracy.
+
+An introductory model (which does not account for SOS) is shown below:
+
+$$P_2 = FG\%*3P\%*FT\%*(AST\% + STL\% + BLK\% +ORB\% - TOV\%)$$
+
+```{r sort-power-percentage}
+marchmadness <- marchmadness %>%
+  mutate(power_percentage = FGprct*threeptprct*FTprct*W_Lprct*
+           (ASTprct+STLprct+BLKprct+ORBprct-TOprct))
+
+marchmadness %>%
+  arrange(desc(power_percentage)) %>%
+  subset(select = c(seed, School, power_percentage)) %>%
+  head(10)
+```
+
+```{r sort-power-percentage-SOS}
+marchmadness <- marchmadness %>%
+  mutate(power_percentage_SOS = FGprct*threeptprct*FTprct*W_Lprct*
+           (ASTprct+STLprct+BLKprct+ORBprct-TOprct)+SOS)
+
+marchmadness %>%
+  arrange(desc(power_percentage_SOS)) %>%
+  subset(select = c(seed, School, power_percentage_SOS)) %>%
+  head(10)
+```
+
+## Introducing Miscellaneous Statistics
+
+There are also a few statistics that don't necessarily fit into the previous categories, but they would be a good thing to potentially add to the model. Statistics such as the pace a team plays at, the percentage of field goal attempts that are three pointers, and the ratio of free throws to field goal attempts are all statistics we could add to the model to see if it has any effect on bracket success.
+
+## A Different Percentage Model
+
+$$P_3 = 10*(FG\%+3P\%+FT\%+\frac{(AST\% + STL\% + BLK\% +ORB\% - TOV\%)}{100})$$
+
+```{r sort-power-percentage-2}
+marchmadness <- marchmadness %>%
+  mutate(power_percentage_2 = 10*( FGprct+threeptprct+FTprct+W_Lprct+
+           (ASTprct+STLprct+BLKprct+ORBprct-TOprct)/100))
+
+marchmadness %>%
+  arrange(desc(power_percentage_2)) %>%
+  subset(select = c(seed, School, power_percentage_2)) %>%
+  head(10)
+```
+
+```{r base-model-2}
+marchmadness <- marchmadness %>%
+  mutate(power = powerScore + power_pergame + 
+           power_percentage_2 + SOS)
+
+marchmadness %>%
+  arrange(desc(power)) %>%
+  subset(select = c(seed, School, power))
+```
+
+When we alter the percentage-based statistics, we will use this base model instead (with `power_percentage_2`) to prevent any other statistics from affecting the others, since the first base model does have that limitation.
+
+# Models and Brackets
+
+## The Base Model
+
+Using the two non-SOS-weighted models above, we can create a base model where all statistics are weighted evenly (i.e. all coefficeints on the variables are 1). We will then account for SOS in this model to avoid double counting SOS, causing a heavier SOS weighting. 
+
+We will also introduce one last variable here: `powerScore`. Since it is a given that the better seeded teams have a higher chance of winning, we accounted for this in our model, where `powerScore = 17 - seed`. Therefore, 1-seeded teams will start with a `powerScore` of 16 while 16-seeded teams will have a score of just 1, giving higher seeded teams a "head start" against the lower seeded teams.
+
+$$P = powerScore + P_1 + P_2 + SOS$$
+
+```{r base-model}
+marchmadness <- marchmadness %>%
+  mutate(power = powerScore + power_pergame + 
+           power_percentage + SOS)
+
+marchmadness %>%
+  arrange(desc(power)) %>%
+  subset(select = c(seed, School, power))
+```
+
+Using the base model, which only accounts for per-game statistics and percentage based statistics, we can see that Gonzaga is the favorite to win the tournament as they are the strongest team. Colgate, a 14 seed, still appears as the 10th best team in the tournament, so that means there could be upset potential in the bracket with them as well (however, their first round matchup is Arkansas, ranked 8th). 
+
+Other notable low-seeded teams with higher-than-expected ranking are 8 seed North Carolina (ranked 20th) and 9 seed St. Bonaventure (ranked 23rd). 
+
+Some high-seeded teams appear very weak according to the model, though. 4 seeed Purdue is ranked 22nd, 4 seed Oklahoma State is ranked 30th, and 3 seed Texas is ranked 25th, showing that these teams have upset potential in the second or third rounds of the tournament.
+
+Using the base model, the following bracket is created:
+
+**insert base model bracket pdf here**
+
+We notice that there are not very many upsets in this bracket, which is odd considering March Madness is known for the crazy upsets that happen every year. The point of this project is to create as many brackets as possible, so we can see how our bracket performs if we remove seed advantage (by down-weighting the `powerScore` variable).
+
+## Base Model with Downweighted Seed Advantage
+
+Here is the base model with `powerScore` halved, so 1 seeds have a score of 8 while 16 seeds have a score of 0.5.
+
+```{r base-model-low-powerscore}
+marchmadness <- marchmadness %>%
+  mutate(power = powerScore/2 + power_pergame + 
+           power_percentage + SOS)
+
+marchmadness %>%
+  arrange(desc(power)) %>%
+  subset(select = c(seed, School, power))
+```
+
+Bracket:
+
+## Base Model with High SOS Weighting
+
+Some argue that statistics are unfounded when SOS isn't accounted for, so we will increase the SOS weighting by 3x in this model.
+
+```{r base-model-high-SOS}
+marchmadness <- marchmadness %>%
+  mutate(power = powerScore + power_pergame + 
+           power_percentage + 3*SOS)
+
+marchmadness %>%
+  arrange(desc(power)) %>%
+  subset(select = c(seed, School, power))
+```
+Bracket:
+
+## Base Model with Downweighted Seed Advantage, High SOS Weighting
+
+Now we will combine the two adjustments on the previous model to make a model with both weight adjustments.
+
+```{r base-model-low-powerscore-high-SOS}
+marchmadness <- marchmadness %>%
+  mutate(power = powerScore/2 + power_pergame + 
+           power_percentage + 3*SOS)
+
+marchmadness %>%
+  arrange(desc(power)) %>%
+  subset(select = c(seed, School, power))
+```
+
+Bracket:
+
+## **Experiment**: Base Model with Extreme SOS Upweighting
+
+As an experiment, we can see what the bracket looks like when we give SOS a 6 times weighting:
+
+```{r base-model-extreme-SOS}
+marchmadness <- marchmadness %>%
+  mutate(power = powerScore + power_pergame + 
+           power_percentage + 6*SOS)
+
+marchmadness %>%
+  arrange(desc(power)) %>%
+  subset(select = c(seed, School, power))
+```
+
+The following bracket has a lot of upsets!!
+
+Bracket:
+
+## Base Model with Emphasis on Steals
+
+The following model gives a four times weighting to the steals per game and steal% categories.
+
+```{r base-model-steal-weight}
+marchmadness <- marchmadness %>%
+  mutate(power = powerScore + power_pergame + 
+           power_percentage_2 + SOS + 
+           3*STL_gm + 3*STLprct/10)
+
+marchmadness %>%
+  arrange(desc(power)) %>%
+  subset(select = c(seed, School, power))
+```
+Bracket:
+
+## Base Model with Emphasis on Three Point Percentage and Attempt Rate
+
+The following model gives an eight times weighting to the three point shooting percentage category and adds in three point attempt rate as a factor to consider.
+
+```{r base-model-threes}
+marchmadness <- marchmadness %>%
+  mutate(power = powerScore + power_pergame + 
+           power_percentage_2 + SOS + 
+           70*threeptprct + 100*threePAr*threeptprct)
+
+marchmadness %>%
+  arrange(desc(power)) %>%
+  subset(select = c(seed, School, power))
+```
+
+Bracket:
+
+## Base Model with Emphasis on Free Throw Percentage and Attempt Rate
+
+The following model gives an eight times weighting to the free throw shooting percentage category and adds in free throw attempt rate as a factor to consider.
+
+```{r base-model-free-throw}
+marchmadness <- marchmadness %>%
+  mutate(power = powerScore + power_pergame + 
+           power_percentage_2 + SOS + 
+           70*FTprct + 100*FTr*FTprct)
+
+marchmadness %>%
+  arrange(desc(power)) %>%
+  subset(select = c(seed, School, power))
+```
+
+## Base Model with Emphasis on All Shooting Categories
+
+The following model gives an eight times weighting to all shooting categories and adds in three point rate and free throw rate as categories to consider in the model. The model also interacts FG and 3P categories with SOS, but not FT categories since the opponent doesn't affect free throws.
+
+```{r base-model-shooting}
+marchmadness <- marchmadness %>%
+  mutate(power = powerScore + power_pergame + 
+           power_percentage_2 + SOS + 
+           70*FTprct + 100*FTr*FTprct +
+           SOS*(70*threeptprct + 100*threeptprct*threePAr +
+           70*FGprct))
+
+marchmadness %>%
+  arrange(desc(power)) %>%
+  subset(select = c(seed, School, power))
+```
+Bracket:
+
+## Base Model with Emphasis on Rebounding
+
+The following model gives an eight times weighting to team rebounds per game as well as offensive rebound percentage to see what teams are stronger in the rebounding category.
+
+```{r base-model-rebounding}
+marchmadness <- marchmadness %>%
+  mutate(power = powerScore + power_pergame + 
+           power_percentage_2 + SOS + 
+           7*TRB_gm + 7*ORBprct/10)
+
+marchmadness %>%
+  arrange(desc(power)) %>%
+  subset(select = c(seed, School, power))
+```
+
+## Base Model with Emphasis on Defensive Statistics
+
+The following model gives an eight times weighting to all defensive statistics included in the base model.
+
+```{r base-model-defense}
+marchmadness <- marchmadness %>%
+  mutate(power = powerScore + power_pergame + 
+           power_percentage_2 + SOS + 
+           7*STL_gm + 7*STLprct/10 +
+           7*BLKprct/10)
+
+marchmadness %>%
+  arrange(desc(power)) %>%
+  subset(select = c(seed, School, power))
+```
+
+## Base Model with Pace and SOS
+
+6 times SOS weighting, Pace included.
+
+```{r base-model-pace}
+marchmadness <- marchmadness %>%
+  mutate(power = powerScore + power_pergame + 
+           power_percentage_2 + 5*SOS +
+           Pace/10)
+
+marchmadness %>%
+  arrange(desc(power)) %>%
+  subset(select = c(seed, School, power))
+```
+
+## New Model 1
+
+This is a new model based on offensive efficiency, pace, turnover percentage, and strength of schedule. Essentially, this model keeps track of how efficient a team is and how fast a team plays, all while being able to limit the number of turnover they have on offense.
+
+```{r new-model-1}
+marchmadness <- marchmadness %>%
+  mutate(power = ORtg/10 + Pace/10 - TOprct + SOS)
+
+marchmadness %>%
+  arrange(desc(power)) %>%
+  subset(select = c(seed, School, power))
+```
